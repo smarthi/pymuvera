@@ -846,6 +846,94 @@ _, candidate_ids = index.search(q_fde, k=100)  # stage 1: fast ANN
 
 ---
 
+## Indexing FDE vectors — quantization recommendations
+
+pymuvera outputs **float32 FDE vectors**. What you do with those vectors —
+how you store and score them in your ANN index — is handled by FAISS,
+OpenSearch, or whatever you index into. pymuvera's job ends at the FDE vector.
+
+```
+ColQwen3.5 token embeddings
+        ↓
+   pymuvera (FDE encoding)       ← pymuvera's domain
+        ↓
+   float32 FDE vector
+        ↓
+   FAISS / OpenSearch             ← quantization lives here
+   (quantization + ANN search)
+        ↓
+   candidate doc ids
+        ↓
+   MaxSim reranking
+```
+
+The quantization choice for the FDE index matters. Based on Elasticsearch's
+BBQ vs TurboQuant analysis (Veasey, 2026):
+
+### For CPU-based ANN search (FAISS, OpenSearch, Elasticsearch)
+
+**Use BBQ / Optimized Scalar Quantization (OSQ).** On shifted embeddings —
+which ColQwen3.5 produces, since transformer embeddings have a non-zero mean —
+OSQ's centroid centering and anisotropic loss give it decisive advantages:
+
+- **OSQ at 1-bit beats TurboQuant at 4-bit on ranking accuracy** with less
+  than 1/5 the storage. Centroid centering removes the dominant shared component
+  before quantization, letting the quantizer focus its bits on the
+  information-bearing residual. TurboQuant's data-oblivious Hadamard rotation
+  cannot exploit this — on shifted embeddings OSQ achieves 9x lower ranking
+  noise at 0 degrees angle vs TurboQuant 1-bit (debiased RMSE 0.0008 vs 0.0073).
+- **10–40x faster scoring** on CPU via integer-arithmetic SIMD (popcount /
+  multiply-accumulate on ARM NEON / x86 AVX). TurboQuant's non-uniform centroids
+  require a data-dependent gather per coordinate — there is no float gather
+  instruction on NEON, making it fundamentally slower regardless of batching.
+- TurboQuant's MSE advantage comes almost entirely from the Hadamard rotation,
+  not its Lloyd-Max non-uniform centroids. OSQ with the same rotation matches
+  TurboQuant at 1–2 bits exactly. OSQ's block-diagonal preconditioner delivers
+  the same distribution-equalization benefit without power-of-2 padding overhead.
+
+```python
+import faiss
+
+enc = MUVERAEncoder(
+    dimension=320, num_simhash_projections=8,
+    num_repetitions=8, fill_empty_partitions=True, seed=42,
+)
+D = enc.encode_documents_batch(doc_token_embeddings)  # (N, fde_dim) float32
+
+# FAISS scalar quantization fallback (use native BBQ in OpenSearch/Elasticsearch)
+sq_index = faiss.IndexIVFScalarQuantizer(
+    faiss.IndexFlatL2(enc.fde_dimension),
+    enc.fde_dimension,
+    faiss.ScalarQuantizer.QT_4bit,   # or QT_8bit for higher accuracy
+)
+sq_index.train(D)
+sq_index.add(D)
+```
+
+**OpenSearch / Elasticsearch:** BBQ ships natively in ES 8.x and is the
+recommended quantization for FDE vectors from transformer models.
+
+### For GPU-based ANN search
+
+TurboQuant is better motivated on GPU. Its non-uniform centroids and lookup-table
+scoring map naturally onto GPU shared memory where gather operations are cheap.
+For FAISS on CUDA or a GPU-native index, TurboQuant's provably near-optimal MSE
+and calibration-free design are genuine advantages.
+
+### For KV cache compression (inference layer — not the FDE index)
+
+TurboQuant is the right tool for KV cache compression in the ColQwen3.5 inference
+layer itself — not for the FDE index. KV cache vectors are quantized once and
+discarded after the forward pass, so there is no opportunity to amortize coordinate
+descent. TurboQuant's fixed codebook derived from the known post-rotation
+distribution is exactly the right design there.
+
+> **Summary:** OSQ/BBQ for the FDE ANN index on CPU — better ranking accuracy at
+> 1/5 the storage, 10–40x faster scoring. TurboQuant for KV cache in the inference
+> layer. Complementary, not competing choices.
+
+---
+
 ## Reconstruction error — what degrades retrieval quality and how to fix it
 
 FDE retrieval approximates Chamfer Similarity — it does not compute it exactly.
@@ -971,6 +1059,8 @@ Subsampled Randomized Hadamard Transform, (SRHT, Woolfe, Liberty, Rokhlin & Tyge
 Cross-Polytope LSH: Andoni & Razenshteyn, 2015 — *Optimal Data-Dependent Hashing for Approximate Near Neighbors*.
 
 Densifying LSH: Shrivastava, 2014 — *Asymmetric LSH (ALSH) for Sublinear Time Maximum Inner Product Search*.
+
+Elasticsearch's BBQ vs. TurboQuant: 10–40× faster on CPU and lower ranking noise at 1/5 the storage for shifted embeddings (Veasey, 2026) — *BBQ: Fast and Accurate Quantization for Billion-Scale Vector Search*.
 
 See [NOTICE](NOTICE) for the full upstream attribution.
 
