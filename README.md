@@ -45,13 +45,9 @@ the Voronoi cells of the cross-polytope — **theoretically optimal for cosine
 similarity** in high dimensions. For ColQwen2 (d=128): 256 partitions at O(d log d)
 cost. For ColQwen3.5 (d=320): 1024 partitions.
 
-**Densifying LSH fill** (Shrivastava, 2014) replaces the Hamming nearest-neighbor fill
-— which costs O(num_tokens × k × num_empty) and can reach 800K+ operations per document
-at k=8 with 512 tokens and 200 empty slots — with a deterministic splitmix64 hash that
-assigns each empty slot a source token in a single operation. Cost scales only with the
-number of empty slots, not corpus size or k. Automatically used for `CROSS_POLYTOPE`
-(no sketch matrix available for Hamming distances); opt-in for other modes via
-`densifying_fill=True`.
+**Densifying LSH fill** (Shrivastava, 2014) replaces O(N·k) Hamming nearest-neighbor
+fill with a deterministic O(num_empty) hash-based fill. No sketch matrix needed —
+automatically used for `CROSS_POLYTOPE`, opt-in for other modes via `densifying_fill=True`.
 
 ---
 
@@ -395,11 +391,7 @@ for each empty slot p:
     rep_slice[p] = projected[token_idx]
 ```
 
-Cost scales only with the number of empty slots — independent of num_tokens and k:
-
-> **Cost: O(num_empty)**
->
-> Same example: 200 empty slots → **200 operations**. ~4,000× less work.
+Cost: **O(num_empty)** — independent of num_tokens and k.
 
 ```python
 # Explicit opt-in for sign-based modes
@@ -423,8 +415,8 @@ enc = MUVERAEncoder(
 
 | Fill strategy | Cost | Quality | When to use |
 |---|---|---|---|
-| Hamming NN (default) | O(num_tokens × k × num_empty) | Geometrically precise | k ≤ 8, short docs, moderate corpus |
-| Densifying LSH | O(num_empty) — scales only with empty slots | Less precise, ~4000× faster at k=8 | k ≥ 10, large corpus, `CROSS_POLYTOPE` |
+| Hamming NN (default) | O(N × k × empty) | Most geometrically precise | k ≤ 8, moderate corpus size |
+| Densifying LSH | O(num_empty) | Less precise, guaranteed fill | k ≥ 10, large corpus, CROSS_POLYTOPE |
 
 ---
 
@@ -444,8 +436,8 @@ When `fill_empty_partitions=True`, two fill strategies are available:
 
 | Strategy | Cost | Precision | When to use |
 |---|---|---|---|
-| **Hamming NN** (default) | O(num_tokens × k × num_empty) | High — nearest token by SimHash distance | k ≤ 8, short docs, moderate corpus |
-| **Densifying LSH** (`densifying_fill=True`) | O(num_empty) — scales only with empty slots | Lower — hash-based, no geometry (~4,000× faster at k=8) | k ≥ 10, large corpora, `CROSS_POLYTOPE` (automatic) |
+| **Hamming NN** (default) | O(N × k × num_empty) | High — nearest token by SimHash distance | k ≤ 10, small–medium corpora |
+| **Densifying LSH** (`densifying_fill=True`) | O(num_empty) | Lower — deterministic hash, no geometry | k ≥ 10, large corpora, `CROSS_POLYTOPE` (automatic) |
 
 Densifying LSH fill (Shrivastava, 2014) assigns each empty slot a source token
 deterministically via a splitmix64 hash of the partition index — no distance
@@ -465,12 +457,9 @@ for all other modes via `densifying_fill=True`.
   partitioning without tuning k. Best for high-d models (ColQwen3.5 d=320) where
   num_partitions = 2×512 = 1024 gives fine-grained coverage. Always pair with
   `fill_empty_partitions=True` (densifying fill is automatic).
-* **Densifying LSH fill** — when fill cost is a bottleneck. At k=8 with 512-token
-  documents, Hamming NN fill costs O(num_tokens × k × num_empty) — up to 819,200
-  operations per document for 200 empty slots. Densifying LSH reduces this to
-  O(num_empty) — 200 operations, ~4,000× faster — by assigning each empty slot a
-  source token via a single deterministic hash. Enable with `densifying_fill=True`.
-  Automatically used for `CROSS_POLYTOPE` (no sketch matrix available for Hamming).
+* **Densifying LSH fill** — when fill cost is a bottleneck (large k, large corpus),
+  or whenever using `CROSS_POLYTOPE`. Enable with `densifying_fill=True` on any
+  projection type. Trades geometric precision for O(num_empty) speed.
 
 ---
 
@@ -541,8 +530,6 @@ with open("fde_config.json") as f:
 
 assert config == config2
 ```
-
----
 
 ---
 
@@ -737,26 +724,6 @@ enc = MUVERAEncoder(
 # raw fde = 4 * 1024 * 320 = 1,310,720 -> compressed to 81,920
 ```
 
----
-
-#### ColQwen3.5 v3 — Cross-Polytope (theoretically optimal cosine partitioning)
-
-```python
-from pymuvera import ProjectionType
-
-enc = MUVERAEncoder(
-  dimension=320,
-  num_repetitions=8,
-  projection_type=ProjectionType.CROSS_POLYTOPE,
-  fill_empty_partitions=True,  # densifying fill used automatically — O(num_empty)
-  final_projection_dimension=81920,
-  seed=42,
-)
-# num_partitions = 2 * 512 = 1024 per repetition (next_power_of_2(320)=512)
-# fde_dimension before compression = 8 × 1024 × 320 = 2,621,440
-# Recommended for high-quality retrieval on complex document pages (tables, charts)
-```
-
 #### ColQwen3.5 v3 — low-rank (correctly configured)
 
 ```python
@@ -947,14 +914,13 @@ realistic expectations.
 ### Error source 1: SimHash partitioning error *(dominant)*
 
 Two similar tokens may land in **different partitions** because a random hyperplane
-boundary falls between them. When this happens, their contribution to the dot product
-is zero instead of `cos(q, d)`.
+boundary falls between them. Their contribution to the dot product is then zero
+instead of `cos(q, d)`.
 
 The MUVERA paper proves the FDE dot product is an **unbiased estimator** of Chamfer
 Similarity in expectation, but individual pairs have variance around that expectation.
 
-**Mitigation:** more `num_repetitions`. Each repetition draws an independent W matrix.
-Variance decreases as `1/num_repetitions`.
+**Mitigation:** more `num_repetitions`. Variance decreases as `1/num_repetitions`.
 
 ![Variance vs repetitions](docs/images/plot1_variance_vs_repetitions.png)
 
@@ -979,19 +945,20 @@ the score is suppressed.
 ### Error source 4: Count Sketch compression error *(if used)*
 
 `AMS_SKETCH` or `final_projection_dimension` add another approximation layer.
-Count Sketch is unbiased — `E[⟨sketch(x), sketch(y)⟩] = ⟨x, y⟩` — but variance
+Count Sketch is unbiased — `E[<sketch(x), sketch(y)>] = <x, y>` — but variance
 scales as `1/projection_dimension`.
 
-**Mitigation:** keep `projection_dimension ≥ 64`; `final_projection_dimension ≥ 4×` your top-k shortlist size.
+**Mitigation:** keep `projection_dimension >= 64`; `final_projection_dimension >= 4x`
+your top-k shortlist size.
 
 ### Error source 5: LOW_RANK_GAUSSIAN extra error *(if used)*
 
-Factoring W as AB⊤ adds SimHash partitioning error on top of Source 1. At r=4 you
+Factoring W as AB^T adds SimHash partitioning error on top of Source 1. At r=4 you
 add roughly 25% more variance. This is still faster convergence than the standard
-CLT rate of O(r⁻¹/²) — EGGROLL's O(r⁻¹) rate is better because symmetry cancels
-all odd cumulants — but it is real additional error.
+CLT rate of O(r^(-1/2)) — EGGROLL's O(r^(-1)) rate is better because symmetry
+cancels all odd cumulants — but it is real additional error.
 
-**Mitigation:** require `r/k ≤ 0.25`. At `r=4, k=6` (r/k=0.67) you pay the full
+**Mitigation:** require `r/k <= 0.25`. At `r=4, k=6` (r/k=0.67) you pay the full
 variance penalty for almost no speed gain.
 
 ![EGGROLL vs CLT convergence](docs/images/plot4_eggroll_vs_clt.png)
@@ -1008,11 +975,11 @@ so the error is systematic rather than random.
 
 **Cost comparison — why you'd accept this tradeoff:**
 
-> **Hamming NN fill:** O(num_tokens × k × num_empty)
-> Example: 200 empty slots, 512 tokens, k=8 → 200 × 512 × 8 = **819,200 operations**
+> **Hamming NN fill:** O(num_tokens x k x num_empty)
+> Example: 200 empty slots, 512 tokens, k=8 = 200 x 512 x 8 = **819,200 operations**
 >
 > **Densifying LSH fill:** O(num_empty)
-> Same example: 200 empty slots → **200 operations** (~4,000× faster)
+> Same example: 200 empty slots = **200 operations** (~4,000x faster)
 
 ![Fill cost comparison](docs/images/plot3_fill_cost_comparison.png)
 
@@ -1020,12 +987,15 @@ so the error is systematic rather than random.
 
 ![Error breakdown by source](docs/images/plot6_error_breakdown.png)
 
-Key observations from the breakdown:
+Key observations:
 
-- **SimHash partitioning error dominates** across all configs. More repetitions is the most effective quality knob.
-- **Empty slot error disappears** with `fill_empty_partitions=True` — the bar for `k=8 + fill` is much shorter.
-- **LOW_RANK_GAUSSIAN** at r=4 adds a visible extra band. Use r/k ≤ 0.25 to keep it small.
-- **SRHT** matches DEFAULT_IDENTITY in error profile — full JL guarantee, no rank approximation.
+- **SimHash partitioning error dominates** across all configs. More repetitions is
+  the most effective quality knob.
+- **Empty slot error disappears** with `fill_empty_partitions=True`.
+- **LOW_RANK_GAUSSIAN** at r=4 adds a visible extra band. Use r/k <= 0.25 to keep
+  it small.
+- **SRHT** matches DEFAULT_IDENTITY in error profile — full JL guarantee, no rank
+  approximation.
 
 ### The two-stage pipeline and error recovery
 
@@ -1039,8 +1009,9 @@ The **irreducible error** is relevant documents that fall entirely outside the t
 ANN candidates — the ones where SimHash partitioning error was severe enough to exclude
 them from the shortlist. This is directly controlled by `num_repetitions`.
 
-> ⚠️ **Common mistake:** measuring pymuvera quality by FDE-only R@1 without a
-> reranking step. Always evaluate the two-stage pipeline.
+> Warning: measuring pymuvera quality by FDE-only R@1 without a reranking step is a
+> common mistake. Always evaluate the two-stage pipeline.
+
 
 ---
 
