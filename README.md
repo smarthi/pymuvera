@@ -533,6 +533,8 @@ assert config == config2
 
 ---
 
+---
+
 ## Configuration guide
 
 Most users hit poor results not because of a wrong projection type but because of a
@@ -558,6 +560,18 @@ match your model exactly — this is the single most important parameter.
 > **Common mistake:** Using `dimension=128` with ColQwen3.5 v3 (which is 320-dim) silently
 > truncates every token embedding to 128 dims, discarding 60% of the representation before
 > MUVERA even runs. Always verify with `model.config.projection_dim` or check the model card.
+
+> **pymuvera only applies to late-interaction models that produce per-token embeddings.**
+> Single-vector models (jina-embeddings, OpenAI text-embedding-*, BGE, E5) don't need FDE
+> encoding — index their output vectors directly into FAISS or any Vector Store.
+
+> **A note on jina-embeddings:** despite supporting image and document inputs,
+> jina-embeddings-v5-omni (nano and small) are **single-vector** models — each document
+> produces one embedding vector, not a set of per-token embeddings. pymuvera does not apply here.
+> The exception is jina-embeddings-v4, which explicitly offers a **multi-vector output mode**
+> (128-dim per token) alongside its single-vector mode — that multi-vector output is a valid
+> pymuvera input. Always check whether your model produces one vector per document
+> (→ index directly) or one vector per token (→ use pymuvera).
 
 ---
 
@@ -724,6 +738,26 @@ enc = MUVERAEncoder(
 # raw fde = 4 * 1024 * 320 = 1,310,720 -> compressed to 81,920
 ```
 
+---
+
+#### ColQwen3.5 v3 — Cross-Polytope (theoretically optimal cosine partitioning)
+
+```python
+from pymuvera import ProjectionType
+
+enc = MUVERAEncoder(
+  dimension=320,
+  num_repetitions=8,
+  projection_type=ProjectionType.CROSS_POLYTOPE,
+  fill_empty_partitions=True,  # densifying fill used automatically — O(num_empty)
+  final_projection_dimension=81920,
+  seed=42,
+)
+# num_partitions = 2 * 512 = 1024 per repetition (next_power_of_2(320)=512)
+# fde_dimension before compression = 8 × 1024 × 320 = 2,621,440
+# Recommended for high-quality retrieval on complex document pages (tables, charts)
+```
+
 #### ColQwen3.5 v3 — low-rank (correctly configured)
 
 ```python
@@ -811,210 +845,6 @@ _, candidate_ids = index.search(q_fde, k=100)  # stage 1: fast ANN
 
 ---
 
----
-
-## Indexing FDE vectors — quantization recommendations
-
-pymuvera outputs **float32 FDE vectors**. What you do with those vectors —
-how you store and score them in your ANN index — is handled by FAISS,
-OpenSearch, or whatever you index into. pymuvera's job ends at the FDE vector.
-
-```
-ColQwen3.5 token embeddings
-        ↓
-   pymuvera (FDE encoding)       ← pymuvera's domain
-        ↓
-   float32 FDE vector
-        ↓
-   FAISS / OpenSearch             ← quantization lives here
-   (quantization + ANN search)
-        ↓
-   candidate doc ids
-        ↓
-   MaxSim reranking
-```
-
-The quantization choice for the FDE index matters. Based on Elasticsearch's
-BBQ vs TurboQuant analysis (Veasey, 2026):
-
-### For CPU-based ANN search (FAISS, OpenSearch, Elasticsearch)
-
-**Use BBQ / Optimized Scalar Quantization (OSQ).** On shifted embeddings —
-which ColQwen3.5 produces, since transformer embeddings have a non-zero mean —
-OSQ's centroid centering and anisotropic loss give it decisive advantages:
-
-- **OSQ at 1-bit beats TurboQuant at 4-bit on ranking accuracy** with less
-  than 1/5 the storage. Centroid centering removes the dominant shared component
-  before quantization, letting the quantizer focus its bits on the
-  information-bearing residual. TurboQuant's data-oblivious Hadamard rotation
-  cannot exploit this — on shifted embeddings OSQ achieves 9x lower ranking
-  noise at 0 degrees angle vs TurboQuant 1-bit (debiased RMSE 0.0008 vs 0.0073).
-- **10–40x faster scoring** on CPU via integer-arithmetic SIMD (popcount /
-  multiply-accumulate on ARM NEON / x86 AVX). TurboQuant's non-uniform centroids
-  require a data-dependent gather per coordinate — there is no float gather
-  instruction on NEON, making it fundamentally slower regardless of batching.
-- TurboQuant's MSE advantage comes almost entirely from the Hadamard rotation,
-  not its Lloyd-Max non-uniform centroids. OSQ with the same rotation matches
-  TurboQuant at 1–2 bits exactly. OSQ's block-diagonal preconditioner delivers
-  the same distribution-equalization benefit without power-of-2 padding overhead.
-
-```python
-import faiss
-
-enc = MUVERAEncoder(
-    dimension=320, num_simhash_projections=8,
-    num_repetitions=8, fill_empty_partitions=True, seed=42,
-)
-D = enc.encode_documents_batch(doc_token_embeddings)  # (N, fde_dim) float32
-
-# FAISS scalar quantization fallback (use native BBQ in OpenSearch/Elasticsearch)
-sq_index = faiss.IndexIVFScalarQuantizer(
-    faiss.IndexFlatL2(enc.fde_dimension),
-    enc.fde_dimension,
-    faiss.ScalarQuantizer.QT_4bit,   # or QT_8bit for higher accuracy
-)
-sq_index.train(D)
-sq_index.add(D)
-```
-
-**OpenSearch / Elasticsearch:** BBQ ships natively in ES 8.x and is the
-recommended quantization for FDE vectors from transformer models.
-
-### For GPU-based ANN search
-
-TurboQuant is better motivated on GPU. Its non-uniform centroids and lookup-table
-scoring map naturally onto GPU shared memory where gather operations are cheap.
-For FAISS on CUDA or a GPU-native index, TurboQuant's provably near-optimal MSE
-and calibration-free design are genuine advantages.
-
-### For KV cache compression (inference layer — not the FDE index)
-
-TurboQuant is the right tool for KV cache compression in the ColQwen3.5 inference
-layer itself — not for the FDE index. KV cache vectors are quantized once and
-discarded after the forward pass, so there is no opportunity to amortize coordinate
-descent. TurboQuant's fixed codebook derived from the known post-rotation
-distribution is exactly the right design there.
-
-> **Summary:** OSQ/BBQ for the FDE ANN index on CPU — better ranking accuracy at
-> 1/5 the storage, 10–40x faster scoring. TurboQuant for KV cache in the inference
-> layer. Complementary, not competing choices.
-
----
-
-## Reconstruction error — what degrades retrieval quality and how to fix it
-
-FDE retrieval approximates Chamfer Similarity — it does not compute it exactly.
-Understanding the error sources helps you configure pymuvera correctly and set
-realistic expectations.
-
-> **The key insight:** all FDE reconstruction error is recoverable by the MaxSim
-> reranking step. The error only affects *which* candidates enter your shortlist,
-> not how accurately they are ranked once there.
-
-### Error source 1: SimHash partitioning error *(dominant)*
-
-Two similar tokens may land in **different partitions** because a random hyperplane
-boundary falls between them. Their contribution to the dot product is then zero
-instead of `cos(q, d)`.
-
-The MUVERA paper proves the FDE dot product is an **unbiased estimator** of Chamfer
-Similarity in expectation, but individual pairs have variance around that expectation.
-
-**Mitigation:** more `num_repetitions`. Variance decreases as `1/num_repetitions`.
-
-![Variance vs repetitions](docs/images/plot1_variance_vs_repetitions.png)
-
-### Error source 2: Aggregation error *(centroid approximation)*
-
-Each non-empty partition slot holds the **centroid** of all tokens that landed there.
-When a query token's nearest document token shares a partition with many others, the
-centroid may point in a meaningfully different direction.
-
-**Mitigation:** tune k so tokens-per-partition stays in the 4–8 range.
-
-![Tokens per partition vs k](docs/images/plot2_tokens_per_partition.png)
-
-### Error source 3: Empty partition error
-
-An empty slot contributes zero to the dot product — as if no document token exists
-in that region. For a query token that would have matched a document token there,
-the score is suppressed.
-
-**Mitigation:** `fill_empty_partitions=True`.
-
-### Error source 4: Count Sketch compression error *(if used)*
-
-`AMS_SKETCH` or `final_projection_dimension` add another approximation layer.
-Count Sketch is unbiased — `E[<sketch(x), sketch(y)>] = <x, y>` — but variance
-scales as `1/projection_dimension`.
-
-**Mitigation:** keep `projection_dimension >= 64`; `final_projection_dimension >= 4x`
-your top-k shortlist size.
-
-### Error source 5: LOW_RANK_GAUSSIAN extra error *(if used)*
-
-Factoring W as AB^T adds SimHash partitioning error on top of Source 1. At r=4 you
-add roughly 25% more variance. This is still faster convergence than the standard
-CLT rate of O(r^(-1/2)) — EGGROLL's O(r^(-1)) rate is better because symmetry
-cancels all odd cumulants — but it is real additional error.
-
-**Mitigation:** require `r/k <= 0.25`. At `r=4, k=6` (r/k=0.67) you pay the full
-variance penalty for almost no speed gain.
-
-![EGGROLL vs CLT convergence](docs/images/plot4_eggroll_vs_clt.png)
-
-### Error source 6: Densifying LSH fill error *(if used)*
-
-Densifying LSH assigns empty slots via a deterministic hash rather than the
-geometrically nearest token. The filled token may be far from the partition's
-region of embedding space.
-
-This is geometrically worse than Hamming NN fill, but the practical impact is small:
-any fill is better than zero, and the hash is consistent across queries and documents
-so the error is systematic rather than random.
-
-**Cost comparison — why you'd accept this tradeoff:**
-
-> **Hamming NN fill:** O(num_tokens x k x num_empty)
-> Example: 200 empty slots, 512 tokens, k=8 = 200 x 512 x 8 = **819,200 operations**
->
-> **Densifying LSH fill:** O(num_empty)
-> Same example: 200 empty slots = **200 operations** (~4,000x faster)
-
-![Fill cost comparison](docs/images/plot3_fill_cost_comparison.png)
-
-### Error breakdown across common configs
-
-![Error breakdown by source](docs/images/plot6_error_breakdown.png)
-
-Key observations:
-
-- **SimHash partitioning error dominates** across all configs. More repetitions is
-  the most effective quality knob.
-- **Empty slot error disappears** with `fill_empty_partitions=True`.
-- **LOW_RANK_GAUSSIAN** at r=4 adds a visible extra band. Use r/k <= 0.25 to keep
-  it small.
-- **SRHT** matches DEFAULT_IDENTITY in error profile — full JL guarantee, no rank
-  approximation.
-
-### The two-stage pipeline and error recovery
-
-![Two-stage recall](docs/images/plot5_two_stage_recall.png)
-
-FDE error shows up as the ~28-point R@1 gap between exact MaxSim (~0.89) and
-FDE-only retrieval (~0.61). The reranking step recovers most of this — FDE + rerank
-reaches ~0.86 R@1, within 3 points of exact.
-
-The **irreducible error** is relevant documents that fall entirely outside the top-100
-ANN candidates — the ones where SimHash partitioning error was severe enough to exclude
-them from the shortlist. This is directly controlled by `num_repetitions`.
-
-> Warning: measuring pymuvera quality by FDE-only R@1 without a reranking step is a
-> common mistake. Always evaluate the two-stage pipeline.
-
-
----
-
 ## Attribution
 
 Python port of the C++ implementation in
@@ -1030,8 +860,6 @@ Subsampled Randomized Hadamard Transform, (SRHT, Woolfe, Liberty, Rokhlin & Tyge
 Cross-Polytope LSH: Andoni & Razenshteyn, 2015 — *Optimal Data-Dependent Hashing for Approximate Near Neighbors*.
 
 Densifying LSH: Shrivastava, 2014 — *Asymmetric LSH (ALSH) for Sublinear Time Maximum Inner Product Search*.
-
-Elasticsearch's BBQ vs. TurboQuant: 10–40× faster on CPU and lower ranking noise at 1/5 the storage for shifted embeddings (Veasey, 2026) — *BBQ: Fast and Accurate Quantization for Billion-Scale Vector Search*.
 
 See [NOTICE](NOTICE) for the full upstream attribution.
 
