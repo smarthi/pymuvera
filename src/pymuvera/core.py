@@ -1,6 +1,4 @@
-"""
-Core FDE generation for muvera-fde.
-"""
+"""Core FDE generation for muvera-fde."""
 
 from __future__ import annotations
 
@@ -15,7 +13,6 @@ from pymuvera._internal.sketch import (
     simhash_partition_indices,
 )
 from pymuvera._internal.validation import (
-    _projection_dim_for_config,
     checked_intermediate_fde_length,
     num_partitions_for_config,
     prepare_embeddings,
@@ -23,9 +20,14 @@ from pymuvera._internal.validation import (
 )
 from pymuvera.config import FDEConfig, ProjectionType
 
-# ---------------------------------------------------------------------------
-# Config-derived helpers (shared with encoder.py)
-# ---------------------------------------------------------------------------
+# ── Config-derived helpers ────────────────────────────────────────────────
+
+
+def _projection_dim_for(config: FDEConfig) -> int:
+    if config.projection_type == ProjectionType.AMS_SKETCH:
+        assert config.projection_dimension is not None
+        return config.projection_dimension
+    return config.dimension
 
 
 def _use_identity(config: FDEConfig) -> bool:
@@ -45,13 +47,10 @@ def _use_cross_polytope(config: FDEConfig) -> bool:
 
 
 def _use_densifying(config: FDEConfig) -> bool:
-    """Return True when densifying fill should be used instead of Hamming fill."""
-    return _use_cross_polytope(config) or config.densifying_fill
+    return config.projection_type == ProjectionType.CROSS_POLYTOPE or config.densifying_fill
 
 
-# ---------------------------------------------------------------------------
-# Shared projection + partition
-# ---------------------------------------------------------------------------
+# ── Projection + partition ────────────────────────────────────────────────
 
 
 def _project_and_partition(
@@ -60,22 +59,6 @@ def _project_and_partition(
     use_identity: bool,
     projection_dim: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
-    """Apply optional Count Sketch and SimHash/Cross-Polytope partitioning.
-
-    Five paths:
-
-    * Full-rank Gaussian (simhash_mat):    sign(projected @ W)
-    * Low-rank Gaussian  (simhash_a/b):    sign((projected @ A) @ B.T)
-    * SRHT               (srht fields):    sign(S H D projected)
-    * Cross-Polytope     (cp fields):      argmax(|H D projected|) + sign bit
-    * No partitioning    (all None):       single partition
-
-    Returns
-    -------
-    projected       : (N, projection_dim)
-    partition_indices : (N,) int32
-    sketch_matrix   : (N, k) or None  -- None for Cross-Polytope and no-SimHash
-    """
     num_points = embedding_matrix.shape[0]
     if use_identity:
         projected = embedding_matrix
@@ -87,18 +70,19 @@ def _project_and_partition(
     sketch_matrix: np.ndarray | None
 
     if rep_params.cp_d_signs is not None:
-        # Cross-Polytope: argmax-based partition, no sketch matrix
+        # Cross-Polytope: full rotation + argmax
         assert rep_params.cp_padded_dim is not None
         partition_indices = apply_cross_polytope(
             projected, rep_params.cp_d_signs, rep_params.cp_padded_dim
         )
-        return projected, partition_indices, None
-
-    if rep_params.simhash_mat is not None:
+        sketch_matrix = None
+    elif rep_params.simhash_mat is not None:
         sketch_matrix = projected @ rep_params.simhash_mat
+        partition_indices = simhash_partition_indices(sketch_matrix)
     elif rep_params.simhash_a is not None:
         assert rep_params.simhash_b is not None
         sketch_matrix = (projected @ rep_params.simhash_a) @ rep_params.simhash_b.T
+        partition_indices = simhash_partition_indices(sketch_matrix)
     elif rep_params.srht_d_signs is not None:
         assert rep_params.srht_sample_indices is not None
         assert rep_params.srht_padded_dim is not None
@@ -108,30 +92,24 @@ def _project_and_partition(
             rep_params.srht_sample_indices,
             rep_params.srht_padded_dim,
         )
+        partition_indices = simhash_partition_indices(sketch_matrix)
     else:
         sketch_matrix = None
+        partition_indices = np.zeros(num_points, dtype=np.int32)
 
-    partition_indices = (
-        simhash_partition_indices(sketch_matrix)
-        if sketch_matrix is not None
-        else np.zeros(num_points, dtype=np.int32)
-    )
     return projected, partition_indices, sketch_matrix
 
 
-# ---------------------------------------------------------------------------
-# Empty-partition fill
-# ---------------------------------------------------------------------------
+# ── Hamming NN empty-partition fill ──────────────────────────────────────
 
 
-def _hamming_fill(
+def _fill_empty_partitions_hamming(
     rep_slice: np.ndarray,
     projected: np.ndarray,
     empty_pidxs: np.ndarray,
     signs_rev: np.ndarray,
     k: int,
 ) -> None:
-    """Fill empty slots with nearest token by SimHash Hamming distance. O(N*k*empty)."""
     empty_binary = empty_pidxs.copy()
     empty_binary ^= empty_binary >> 1
     empty_binary ^= empty_binary >> 2
@@ -164,28 +142,20 @@ def _normalize_and_fill_rep(
     num_partitions: int,
     rep_seed: int,
 ) -> None:
-    """Normalize partition sums to centroids; fill empty slots if configured."""
-    partition_sizes = np.bincount(partition_indices, minlength=num_partitions).astype(
-        np.float32, copy=False
-    )
+    partition_sizes = np.bincount(partition_indices, minlength=num_partitions).astype(np.float32)
     filled_mask = partition_sizes > 0
     rep_slice[filled_mask] /= partition_sizes[filled_mask, np.newaxis]
 
-    if not config.fill_empty_partitions:
-        return
-
-    empty_pidxs = np.nonzero(~filled_mask)[0]
-    if len(empty_pidxs) == 0:
-        return
-
-    if _use_densifying(config):
-        # Densifying LSH: O(num_empty), hash-based, no sketch_matrix needed.
-        # Always used for CROSS_POLYTOPE; optional for other modes via densifying_fill=True.
-        densifying_fill(rep_slice, projected, empty_pidxs, rep_seed)
-    elif sketch_matrix is not None:
-        # Hamming nearest-neighbour fill: O(N*k), more geometrically precise.
-        signs_rev = (sketch_matrix[:, ::-1] > 0).astype(np.int32)
-        _hamming_fill(rep_slice, projected, empty_pidxs, signs_rev, config.num_simhash_projections)
+    if config.fill_empty_partitions:
+        empty_pidxs = np.nonzero(~filled_mask)[0]
+        if len(empty_pidxs) > 0:
+            if _use_densifying(config):
+                densifying_fill(rep_slice, projected, empty_pidxs, rep_seed)
+            elif sketch_matrix is not None:
+                signs_rev = (sketch_matrix[:, ::-1] > 0).astype(np.int32)
+                _fill_empty_partitions_hamming(
+                    rep_slice, projected, empty_pidxs, signs_rev, config.num_simhash_projections
+                )
 
 
 def _maybe_count_sketch(out: np.ndarray, config: FDEConfig) -> np.ndarray:
@@ -194,9 +164,7 @@ def _maybe_count_sketch(out: np.ndarray, config: FDEConfig) -> np.ndarray:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Public generation functions
-# ---------------------------------------------------------------------------
+# ── Public generation functions ───────────────────────────────────────────
 
 
 def generate_query_fde(
@@ -204,29 +172,18 @@ def generate_query_fde(
     config: FDEConfig,
     rep_params_list: list[RepParams] | None = None,
 ) -> np.ndarray:
-    """Generate a query-side FDE (SUM aggregation).
-
-    Parameters
-    ----------
-    point_cloud     : (num_tokens, dimension) or flat 1-D
-    config          : encoding configuration; fill_empty_partitions must be False
-    rep_params_list : precomputed parameters; built on the fly when None
-
-    Returns
-    -------
-    np.ndarray, shape (fde_dimension,), dtype float32
-    """
     validate_config(config)
     if config.fill_empty_partitions:
         raise ValueError("Query FDE does not support fill_empty_partitions.")
 
     embedding_matrix = prepare_embeddings(point_cloud, config)
     use_id = _use_identity(config)
-    projection_dim = _projection_dim_for_config(config)
-    num_partitions = num_partitions_for_config(config)
+    projection_dim = _projection_dim_for(config)
+    num_partitions = num_partitions_for_config(config, projection_dim)
 
     out = np.zeros(
-        checked_intermediate_fde_length(config, projection_dim, num_partitions), dtype=np.float32
+        checked_intermediate_fde_length(config, projection_dim, num_partitions),
+        dtype=np.float32,
     )
 
     for rep in range(config.num_repetitions):
@@ -262,34 +219,24 @@ def generate_document_fde(
     config: FDEConfig,
     rep_params_list: list[RepParams] | None = None,
 ) -> np.ndarray:
-    """Generate a document-side FDE (AVERAGE aggregation).
-
-    Parameters
-    ----------
-    point_cloud     : (num_tokens, dimension) or flat 1-D
-    config          : encoding configuration
-    rep_params_list : precomputed parameters; built on the fly when None
-
-    Returns
-    -------
-    np.ndarray, shape (fde_dimension,), dtype float32
-    """
     validate_config(config)
     embedding_matrix = prepare_embeddings(point_cloud, config)
     use_id = _use_identity(config)
-    projection_dim = _projection_dim_for_config(config)
-    num_partitions = num_partitions_for_config(config)
+    projection_dim = _projection_dim_for(config)
+    num_partitions = num_partitions_for_config(config, projection_dim)
 
     out = np.zeros(
-        checked_intermediate_fde_length(config, projection_dim, num_partitions), dtype=np.float32
+        checked_intermediate_fde_length(config, projection_dim, num_partitions),
+        dtype=np.float32,
     )
 
     for rep in range(config.num_repetitions):
+        rep_seed = config.seed + rep
         params = (
             rep_params_list[rep]
             if rep_params_list is not None
             else build_rep_params(
-                config.seed + rep,
+                rep_seed,
                 config.dimension,
                 projection_dim,
                 config.num_simhash_projections,
@@ -315,7 +262,7 @@ def generate_document_fde(
             sketch_matrix,
             config,
             num_partitions,
-            config.seed + rep,
+            rep_seed,
         )
 
     return _maybe_count_sketch(out, config)

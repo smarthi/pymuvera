@@ -1,4 +1,4 @@
-# pymuvera — MUVERA + EGGROLL: Fixed Dimensional Encodings for Multi-Vector Retrieval
+# pymuvera — MUVERA: Fixed Dimensional Encodings for Multi-Vector Retrieval
 
 **Sublinear ANN retrieval for ColBERT, ColPali, ColQwen2, and ColQwen3.5.**
 
@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
-**low-rank SimHash factorisation** (EGGROLL, Sarkar et al., 2025),
+**low-rank SimHash factorisation** (inspired by Sarkar et al., 2025),
 **Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008),
 **Cross-Polytope LSH** (Andoni & Razenshteyn, 2015), and
 **Densifying LSH fill** (Shrivastava, 2014).
@@ -16,7 +16,7 @@ A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 | | Reference |
 |---|---|
 | MUVERA paper | [Dhulipala et al., 2024](https://arxiv.org/abs/2405.19504) |
-| EGGROLL paper (LOW_RANK_GAUSSIAN) | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
+| LOW_RANK_GAUSSIAN inspiration | [Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf) |
 | SRHT | [Woolfe, Liberty, Rokhlin & Tygert, 2008](https://doi.org/10.1016/j.acha.2007.12.002) |
 | Cross-Polytope LSH | [Andoni & Razenshteyn, 2015](https://arxiv.org/abs/1509.02897) |
 | Densifying LSH | [Shrivastava, 2014](https://arxiv.org/abs/1401.4605) |
@@ -30,10 +30,10 @@ The MUVERA paper uses a full-rank Gaussian matrix for SimHash partitioning and
 Hamming nearest-neighbor fill for empty partitions. This library adds four new
 capabilities:
 
-**`LOW_RANK_GAUSSIAN`** (EGGROLL, Sarkar et al., 2025) factors the SimHash matrix
-as AB⊤ (`A ∈ ℝ^{d×r}`, `B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition cost from
-`O(N·d·k)` to `O(N·d·r + N·r·k)`. O(r⁻¹) convergence to full-rank, faster than
-the CLT rate. At r=4, ColQwen2 (d=128, k=8): **~1.9× faster**, ~25% variance increase.
+**`LOW_RANK_GAUSSIAN`** factors the SimHash matrix as AB⊤ (`A ∈ ℝ^{d×r}`,
+`B ∈ ℝ^{k×r}`, `r ≪ k`), cutting partition cost from `O(N·d·k)` to
+`O(N·d·r + N·r·k)`. Inspired by Sarkar et al. (2025); formal partition quality
+bounds are an open problem. At r=4, ColQwen2 (d=128, k=8): **~1.9× faster**.
 
 **`SRHT`** (Woolfe et al., 2008) applies a structured `S·H·D` transform at
 `O(N·d·log d)` cost, independent of k. **Full JL guarantee**, zero rank error.
@@ -144,7 +144,7 @@ MUVERAEncoder(
 | `num_simhash_projections` | 4 | SimHash bits *k*; partitions = 2^k |
 | `num_repetitions` | 1 | Independent repetitions (more → better approximation) |
 | `seed` | 1 | Shared RNG seed — **must match** query and document sides |
-| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH`, `LOW_RANK_GAUSSIAN` (EGGROLL), `SRHT`, or `CROSS_POLYTOPE` (argmax-based, theoretically optimal cosine partitioning) |
+| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH`, `LOW_RANK_GAUSSIAN` (low-rank factored), `SRHT`, or `CROSS_POLYTOPE` (argmax-based, theoretically optimal cosine partitioning) |
 | `projection_dimension` | `None` | Target dim after Count Sketch; required for `AMS_SKETCH` |
 | `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections`. r=4 is a practical sweet spot for ColQwen2 (d=128, k≥8) |
 | `fill_empty_partitions` | `False` | Document side: fill empty slots |
@@ -245,7 +245,7 @@ enc = MUVERAEncoder(
 
 ---
 
-#### Mode 2: `LOW_RANK_GAUSSIAN` — low-rank factored SimHash (EGGROLL)
+#### Mode 2: `LOW_RANK_GAUSSIAN` — low-rank factored SimHash
 
 Factors `W ≈ AB⊤` where `A ∈ ℝ^{d×r}`, `B ∈ ℝ^{k×r}`, replacing one large
 matmul with two smaller ones:
@@ -263,21 +263,14 @@ enc = MUVERAEncoder(
 )
 ```
 
-**Convergence** (EGGROLL, Sarkar et al. 2025, Theorem 4): the low-rank sign
-pattern converges to the full-rank Gaussian at **O(r⁻¹)** — faster than the
-**CLT rate of O(r⁻¹/²)**.
+**Computational motivation:** the low-rank factorisation reduces SimHash cost
+from O(N·d·k) to O(N·d·r + N·r·k). Sign-pattern agreement with full-rank
+Gaussian SimHash improves as r/k decreases. Inspired by Sarkar et al. (2025),
+though their theoretical guarantees for evolution strategy updates do not
+transfer directly to the SimHash partition setting. Formal partition quality
+bounds are an open problem; use **r/k ≤ 0.25** as a practical guideline.
 
-**What is the CLT rate?** The Central Limit Theorem tells us that averaging *n*
-independent random variables reduces error at O(n⁻¹/²) — the square root of the
-sample size. This is the default convergence rate for most random approximations.
-EGGROLL beats it because the low-rank matrix AB⊤ has a *symmetric* distribution:
-the sign of each projection is equally likely to be ±1, which causes all **odd
-cumulants** (1st, 3rd, 5th order terms) in the Edgeworth expansion to cancel
-exactly. Since those odd terms are what normally contribute O(r⁻¹/²) error,
-their cancellation pushes the leading error down to O(r⁻¹) — the same mechanism
-that makes symmetric random walks converge faster than asymmetric ones.
-
-| `simhash_rank` r | CLT rate O(r⁻¹/²) | EGGROLL rate O(r⁻¹) | Speedup vs baseline |
+| `simhash_rank` r | CLT baseline O(r⁻¹/²) | LOW_RANK_GAUSSIAN O(r⁻¹) (empirical) | Speedup vs baseline |
 |---|---|---|---|
 | 4 | ~50% error | **~25% error** | 1.9× |
 | 9 | ~33% error | **~11% error** | — |
@@ -425,7 +418,7 @@ enc = MUVERAEncoder(
 | Mode | SimHash cost (d=128) | vs baseline | Quality | Extra constraint |
 |---|---|---|---|---|
 | `DEFAULT_IDENTITY` | 1024N ops (k=8) | 1× | Full-rank Gaussian baseline | None |
-| `LOW_RANK_GAUSSIAN` r=4 | 544N ops (k=8) | **1.9×** | O(r⁻¹) convergence, ~25% variance ↑ | `1 ≤ r < k` |
+| `LOW_RANK_GAUSSIAN` r=4 | 544N ops (k=8) | **1.9×** | Sign-pattern approx., ~25% variance ↑ | `1 ≤ r < k` |
 | `LOW_RANK_GAUSSIAN` r=1 | 136N ops (k=8) | **7.5×** | ~100% variance baseline | `1 ≤ r < k` |
 | `SRHT` | 904N ops (k=8) | 1.1× | Full JL, no rank error | `k ≤ next_pow2(d)` |
 | `CROSS_POLYTOPE` | 896N ops (all partitions) | 1.1× | Theoretically optimal cosine | `fill` recommended |
@@ -560,18 +553,6 @@ match your model exactly — this is the single most important parameter.
 > **Common mistake:** Using `dimension=128` with ColQwen3.5 v3 (which is 320-dim) silently
 > truncates every token embedding to 128 dims, discarding 60% of the representation before
 > MUVERA even runs. Always verify with `model.config.projection_dim` or check the model card.
-
-> **pymuvera only applies to late-interaction models that produce per-token embeddings.**
-> Single-vector models (jina-embeddings, OpenAI text-embedding-*, BGE, E5) don't need FDE
-> encoding — index their output vectors directly into FAISS or any Vector Store.
-
-> **A note on jina-embeddings:** despite supporting image and document inputs,
-> jina-embeddings-v5-omni (nano and small) are **single-vector** models — each document
-> produces one embedding vector, not a set of per-token embeddings. pymuvera does not apply here.
-> The exception is jina-embeddings-v4, which explicitly offers a **multi-vector output mode**
-> (128-dim per token) alongside its single-vector mode — that multi-vector output is a valid
-> pymuvera input. Always check whether your model produces one vector per document
-> (→ index directly) or one vector per token (→ use pymuvera).
 
 ---
 
@@ -851,9 +832,9 @@ Python port of the C++ implementation in
 [Google's graph-mining project](https://github.com/google/graph-mining/tree/main/sketching/point_cloud),
 licensed under Apache 2.0.
 
-Low-rank SimHash extension inspired by
-[EGGROLL: Evolution Strategies at the Hyperscale](https://eshyperscale.github.io/imgs/paper.pdf)
-(Sarkar et al., 2025).
+Low-rank SimHash (`LOW_RANK_GAUSSIAN`) inspired by
+[Sarkar et al., 2025](https://eshyperscale.github.io/imgs/paper.pdf),
+though their theoretical results do not transfer directly to the SimHash setting.
 
 Subsampled Randomized Hadamard Transform, (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008)
 
