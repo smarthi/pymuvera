@@ -73,6 +73,16 @@ def _check_srht(config: FDEConfig) -> None:
         )
 
 
+def _check_calibrated_eigenbasis(config: FDEConfig) -> None:
+    if config.projection_type != ProjectionType.CALIBRATED_EIGENBASIS:
+        return
+    if config.num_simhash_projections < 1:
+        raise ValueError(
+            "CALIBRATED_EIGENBASIS requires num_simhash_projections >= 1, "
+            f"got {config.num_simhash_projections}"
+        )
+
+
 def validate_config(config: FDEConfig) -> None:
     _check_positive(config.dimension, "dimension")
     _check_positive(config.num_repetitions, "num_repetitions")
@@ -82,6 +92,7 @@ def validate_config(config: FDEConfig) -> None:
     _check_projection_dimension(config)
     _check_simhash_rank(config)
     _check_srht(config)
+    _check_calibrated_eigenbasis(config)
 
 
 def num_partitions_for_config(config: FDEConfig, projection_dim: int) -> int:

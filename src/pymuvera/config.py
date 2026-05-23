@@ -73,6 +73,27 @@ class ProjectionType(enum.Enum):
     Cost: O(N x d' x log(d')).
     """
 
+    CALIBRATED_EIGENBASIS = 5
+    """Data-aware eigenbasis rotation with optional eigenvalue-weighted SimHash.
+
+    Rotates embeddings into the eigenbasis of the empirical token covariance
+    before SimHash partitioning.  The stored FDE slot centroids live in the
+    eigenbasis space; inner products are preserved exactly since the rotation
+    is orthogonal.
+
+    With ``use_eigenvalue_weighting=True`` (default), the SimHash projection
+    matrix is sampled from N(0, diag(lambda)) in the rotated space, concentrating
+    partition discrimination on the high-variance eigenbasis coordinates — the
+    SimHash analog of the water-filling bit allocation in SpectralQuant
+    (Vangara & Gopinath, 2026).
+
+    Requires calibration: call ``MUVERAEncoder.calibrate(embeddings)`` or pass
+    an ``EigenbasisCalibration`` at construction time before encoding.
+
+    Cost: O(N x d^2) for rotation + O(N x d x k) for SimHash.
+    Constraint: ``num_simhash_projections >= 1``.
+    """
+
 
 class FDEConfig(BaseModel):
     """Immutable configuration for Fixed Dimensional Encoding."""
@@ -89,3 +110,12 @@ class FDEConfig(BaseModel):
     fill_empty_partitions: bool = False
     densifying_fill: bool = False
     final_projection_dimension: int | None = None
+    use_eigenvalue_weighting: bool = True
+    """Only active when projection_type == CALIBRATED_EIGENBASIS.
+
+    If True (default), SimHash rows are scaled by sqrt(lambda_i) in the
+    eigenbasis so that high-variance coordinates dominate bucket assignment.
+    If False, uniform Gaussian SimHash is applied in the eigenbasis
+    (ablation baseline isolating the rotation contribution from the
+    eigenvalue-weighted projection contribution).
+    """

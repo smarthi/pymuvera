@@ -53,7 +53,7 @@ def _next_power_of_2(n: int) -> int:
 
 
 def _fwht_batch(x: np.ndarray) -> np.ndarray:
-    """Unnormalised Walsh-Hadamard transform row-wise. Requires d = power of 2."""
+    """Unnormalized Walsh-Hadamard transform row-wise. Requires d = power of 2."""
     out = x.copy()
     n = out.shape[-1]
     h = 1
@@ -165,6 +165,56 @@ def densifying_fill(
         h = ((h ^ (h >> np.uint64(27))) * np.uint64(0x94D049BB133111EB)) & _UINT64_MASK
         h = h ^ (h >> np.uint64(31))
         rep_slice[int(p)] = projected[int(h % np.uint64(n))]
+
+
+# ── Calibrated eigenbasis SimHash ────────────────────────────────────────
+
+
+def calibrated_eigenbasis_simhash_matrix(
+    seed: int,
+    eigenvalues: np.ndarray,
+    num_projections: int,
+    use_eigenvalue_weighting: bool = True,
+) -> np.ndarray:
+    """Sample a (d, k) SimHash projection matrix in eigenbasis space.
+
+    Parameters
+    ----------
+    seed:
+        RNG seed for this repetition.
+    eigenvalues:
+        (d,) descending eigenvalues of the empirical key covariance.
+    num_projections:
+        Number of SimHash bits *k*.
+    use_eigenvalue_weighting:
+        If True (default), scale row *i* of the raw Gaussian matrix by
+        ``sqrt(lambda_i)`` so that high-variance eigenbasis coordinates
+        dominate the SimHash partition assignment.  This is the water-filling
+        analog: the effective metric becomes the lambda-weighted inner product
+
+            z^T diag(lambda) z'
+
+        concentrating discrimination on the ``deff`` semantic dimensions.
+
+        If False, use standard uniform Gaussian projection in the rotated
+        space — equivalent to DEFAULT_IDENTITY applied after the eigenbasis
+        rotation, useful as an ablation baseline.
+
+    Returns
+    -------
+    np.ndarray
+        (d, k) float32 projection matrix ready for ``projected @ W``.
+    """
+    d = len(eigenvalues)
+    rng = np.random.default_rng(seed)
+    W = rng.standard_normal((d, num_projections)).astype(np.float32)
+    if use_eigenvalue_weighting:
+        # Row i scaled by sqrt(lambda_i): contribution of coord i to sign(z@W)
+        # has std proportional to lambda_i, concentrating bucket assignment on
+        # high-variance eigenbasis directions.
+        scale = np.sqrt(np.maximum(eigenvalues, 0.0)).astype(np.float32)
+        W *= scale[:, np.newaxis]
+    return W
 
 
 # ── Count Sketch ──────────────────────────────────────────────────────────

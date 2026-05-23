@@ -941,7 +941,7 @@ class TestDensifyingFill:
         projected = rng.standard_normal((5, DIM)).astype(np.float32)
         empty_pidxs = np.array([0, 2, 4, 6, 8, 10, 12, 14], dtype=np.int32)
 
-        df(rep_slice, projected, empty_pidxs, rep_seed=42)
+        df(rep_slice, projected, empty_pidxs, seed=42)
 
         # All previously-empty slots should now be non-zero
         for p in empty_pidxs:

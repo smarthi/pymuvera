@@ -46,6 +46,10 @@ def _use_cross_polytope(config: FDEConfig) -> bool:
     return config.projection_type == ProjectionType.CROSS_POLYTOPE
 
 
+def _use_calibrated_eigenbasis(config: FDEConfig) -> bool:
+    return config.projection_type == ProjectionType.CALIBRATED_EIGENBASIS
+
+
 def _use_densifying(config: FDEConfig) -> bool:
     return config.projection_type == ProjectionType.CROSS_POLYTOPE or config.densifying_fill
 
@@ -60,14 +64,25 @@ def _project_and_partition(
     projection_dim: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray | None]:
     num_points = embedding_matrix.shape[0]
+
+    sketch_matrix: np.ndarray | None
+
+    # CALIBRATED_EIGENBASIS: rotate into eigenbasis first, then project with
+    # the eigenvalue-weighted SimHash matrix.  The stored FDE centroid lives in
+    # the eigenbasis space; inner products are preserved exactly (U is orthogonal).
+    if rep_params.eigenbasis_rotation is not None:
+        assert rep_params.eigenbasis_simhash_mat is not None
+        projected = embedding_matrix @ rep_params.eigenbasis_rotation  # (N, d) in eigenbasis
+        sketch_matrix = projected @ rep_params.eigenbasis_simhash_mat  # (N, k)
+        partition_indices = simhash_partition_indices(sketch_matrix)
+        return projected, partition_indices, sketch_matrix
+
     if use_identity:
         projected = embedding_matrix
     else:
         assert rep_params.cs_indices is not None and rep_params.cs_signs is not None
         projected = np.zeros((num_points, projection_dim), dtype=np.float32)
         np.add.at(projected.T, rep_params.cs_indices, (embedding_matrix * rep_params.cs_signs).T)
-
-    sketch_matrix: np.ndarray | None
 
     if rep_params.cp_d_signs is not None:
         # Cross-Polytope: full rotation + argmax
@@ -171,6 +186,8 @@ def generate_query_fde(
     point_cloud: np.ndarray,
     config: FDEConfig,
     rep_params_list: list[RepParams] | None = None,
+    calibration_eigenvalues: np.ndarray | None = None,
+    calibration_eigenvectors: np.ndarray | None = None,
 ) -> np.ndarray:
     validate_config(config)
     if config.fill_empty_partitions:
@@ -186,6 +203,8 @@ def generate_query_fde(
         dtype=np.float32,
     )
 
+    use_cb = _use_calibrated_eigenbasis(config)
+
     for rep in range(config.num_repetitions):
         params = (
             rep_params_list[rep]
@@ -200,6 +219,10 @@ def generate_query_fde(
                 simhash_rank=config.simhash_rank,
                 use_srht=_use_srht(config),
                 use_cross_polytope=_use_cross_polytope(config),
+                use_calibrated_eigenbasis=use_cb,
+                calibration_eigenvalues=calibration_eigenvalues,
+                calibration_eigenvectors=calibration_eigenvectors,
+                use_eigenvalue_weighting=config.use_eigenvalue_weighting,
             )
         )
         projected, partition_indices, _ = _project_and_partition(
@@ -218,6 +241,8 @@ def generate_document_fde(
     point_cloud: np.ndarray,
     config: FDEConfig,
     rep_params_list: list[RepParams] | None = None,
+    calibration_eigenvalues: np.ndarray | None = None,
+    calibration_eigenvectors: np.ndarray | None = None,
 ) -> np.ndarray:
     validate_config(config)
     embedding_matrix = prepare_embeddings(point_cloud, config)
@@ -229,6 +254,8 @@ def generate_document_fde(
         checked_intermediate_fde_length(config, projection_dim, num_partitions),
         dtype=np.float32,
     )
+
+    use_cb = _use_calibrated_eigenbasis(config)
 
     for rep in range(config.num_repetitions):
         rep_seed = config.seed + rep
@@ -245,6 +272,10 @@ def generate_document_fde(
                 simhash_rank=config.simhash_rank,
                 use_srht=_use_srht(config),
                 use_cross_polytope=_use_cross_polytope(config),
+                use_calibrated_eigenbasis=use_cb,
+                calibration_eigenvalues=calibration_eigenvalues,
+                calibration_eigenvectors=calibration_eigenvectors,
+                use_eigenvalue_weighting=config.use_eigenvalue_weighting,
             )
         )
         projected, partition_indices, sketch_matrix = _project_and_partition(

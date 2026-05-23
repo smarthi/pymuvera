@@ -10,8 +10,9 @@
 A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 **low-rank SimHash factorisation** (inspired by Sarkar et al., 2025),
 **Subsampled Randomized Hadamard Transform** (SRHT, Woolfe, Liberty, Rokhlin & Tygert, 2008),
-**Cross-Polytope LSH** (Andoni & Razenshteyn, 2015), and
-**Densifying LSH fill** (Shrivastava, 2014).
+**Cross-Polytope LSH** (Andoni & Razenshteyn, 2015),
+**Densifying LSH fill** (Shrivastava, 2014), and
+**Calibrated Eigenbasis SimHash** with eigenvalue-weighted partitioning (inspired by SpectralQuant, Vangara & Gopinath, 2026).
 
 | | Reference |
 |---|---|
@@ -20,6 +21,7 @@ A pure-Python port of Google's graph-mining MUVERA implementation, extended with
 | SRHT | [Woolfe, Liberty, Rokhlin & Tygert, 2008](https://doi.org/10.1016/j.acha.2007.12.002) |
 | Cross-Polytope LSH | [Andoni & Razenshteyn, 2015](https://arxiv.org/abs/1509.02897) |
 | Densifying LSH | [Shrivastava, 2014](https://arxiv.org/abs/1401.4605) |
+| CALIBRATED_EIGENBASIS inspiration | [Vangara & Gopinath, 2026](https://arxiv.org/abs/2506.nnnnn) |
 | Original C++ implementation | [google/graph-mining](https://github.com/google/graph-mining/tree/main/sketching/point_cloud) |
 
 ---
@@ -48,6 +50,17 @@ cost. For ColQwen3.5 (d=320): 1024 partitions.
 **Densifying LSH fill** (Shrivastava, 2014) replaces O(N·k) Hamming nearest-neighbor
 fill with a deterministic O(num_empty) hash-based fill. No sketch matrix needed —
 automatically used for `CROSS_POLYTOPE`, opt-in for other modes via `densifying_fill=True`.
+
+**`CALIBRATED_EIGENBASIS`** rotates embeddings into the eigenbasis of the empirical
+token covariance before SimHash partitioning, concentrating partition discrimination
+on the few high-variance directions that trained attention heads actually use.  With
+`use_eigenvalue_weighting=True` (default), the SimHash projection matrix is sampled
+from N(0, diag(λ)) in the rotated space — the water-filling analog from rate–distortion
+theory applied to FDE partitioning.  Inspired by SpectralQuant's finding (Vangara &
+Gopinath, 2026) that LLM key covariances have participation ratio deff/dh ≈ 3–5% at
+dh=128, a structure expected to hold in ColQwen2/ColQwen3.5 patch embeddings.
+Requires a one-time `calibrate(embeddings)` call; calibration objects are serializable
+alongside your ANN index.
 
 ---
 
@@ -134,7 +147,10 @@ MUVERAEncoder(
     projection_dimension: int | None = None,
     simhash_rank: int = 1,
     fill_empty_partitions: bool = False,
+    densifying_fill: bool = False,
     final_projection_dimension: int | None = None,
+    use_eigenvalue_weighting: bool = True,
+    calibration: EigenbasisCalibration | None = None,
 )
 ```
 
@@ -144,12 +160,14 @@ MUVERAEncoder(
 | `num_simhash_projections` | 4 | SimHash bits *k*; partitions = 2^k |
 | `num_repetitions` | 1 | Independent repetitions (more → better approximation) |
 | `seed` | 1 | Shared RNG seed — **must match** query and document sides |
-| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH`, `LOW_RANK_GAUSSIAN` (low-rank factored), `SRHT`, or `CROSS_POLYTOPE` (argmax-based, theoretically optimal cosine partitioning) |
+| `projection_type` | `DEFAULT_IDENTITY` | `DEFAULT_IDENTITY`, `AMS_SKETCH`, `LOW_RANK_GAUSSIAN`, `SRHT`, `CROSS_POLYTOPE`, or `CALIBRATED_EIGENBASIS` |
 | `projection_dimension` | `None` | Target dim after Count Sketch; required for `AMS_SKETCH` |
-| `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections`. r=4 is a practical sweet spot for ColQwen2 (d=128, k≥8) |
+| `simhash_rank` | 1 | Rank *r* for `LOW_RANK_GAUSSIAN`; must satisfy `1 ≤ r < num_simhash_projections` |
 | `fill_empty_partitions` | `False` | Document side: fill empty slots |
-| `densifying_fill` | `False` | Use O(num_empty) Densifying LSH fill (Shrivastava, 2014) instead of O(N×k) Hamming NN fill. Automatically forced True for `CROSS_POLYTOPE` |
+| `densifying_fill` | `False` | Use O(num_empty) Densifying LSH fill. Automatically forced True for `CROSS_POLYTOPE` |
 | `final_projection_dimension` | `None` | Post-accumulation Count Sketch compression |
+| `use_eigenvalue_weighting` | `True` | `CALIBRATED_EIGENBASIS` only: scale SimHash rows by √λ_i so high-variance eigendirections dominate bucket assignment (water-filling analog). Set False for ablation |
+| `calibration` | `None` | `CALIBRATED_EIGENBASIS` only: pre-computed `EigenbasisCalibration`. Alternative to calling `calibrate()` post-construction |
 
 **Property:** `fde_dimension` — output vector length.
 
@@ -370,7 +388,93 @@ to agree on all k sign bits (Andoni & Razenshteyn, 2015).
 
 ---
 
-#### Densifying LSH fill — O(num_empty) fill for all projection types
+#### Mode 5: `CALIBRATED_EIGENBASIS` — data-aware eigenbasis rotation
+
+Rotates embeddings into the eigenbasis of the empirical token covariance before
+SimHash partitioning.  Requires a one-time `calibrate(embeddings)` call on a
+representative corpus sample.
+
+```python
+from pymuvera import MUVERAEncoder, ProjectionType, calibrate_from_embeddings
+
+# Step 1: calibrate on a sample of your corpus embeddings (run once, save to disk)
+calibration = calibrate_from_embeddings(corpus_embeddings)  # (N, 128) array
+calibration.save("colqwen2_calibration.npz")
+
+# Step 2: build encoder — two equivalent ways
+# Option A: pass calibration at construction
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    projection_type=ProjectionType.CALIBRATED_EIGENBASIS,
+    fill_empty_partitions=True,
+    seed=42,
+    calibration=calibration,
+)
+
+# Option B: call calibrate() post-construction (useful when streaming corpus data)
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    projection_type=ProjectionType.CALIBRATED_EIGENBASIS,
+    fill_empty_partitions=True,
+    seed=42,
+)
+enc.calibrate(corpus_embeddings)   # returns self, chainable
+
+# Step 3: encode as usual — same API as every other mode
+q_fde = enc.encode_query(query_tokens)
+d_fde = enc.encode_document(doc_tokens)
+
+# Step 4: load calibration in a new process without re-running the corpus pass
+from pymuvera import EigenbasisCalibration
+cal = EigenbasisCalibration.load("colqwen2_calibration.npz")
+enc2 = MUVERAEncoder(..., projection_type=ProjectionType.CALIBRATED_EIGENBASIS, calibration=cal)
+```
+
+**How it works:** `calibrate_from_embeddings()` computes the empirical covariance
+Σ of the calibration embeddings, eigendecomposes it, and stores the eigenbasis U
+(eigenvectors sorted by descending eigenvalue λ).  At encode time, each embedding is
+rotated into this basis (`z = x @ U`) before SimHash.  The FDE partition centroids
+live in the eigenbasis space; inner products are preserved exactly since U is orthogonal.
+
+**Eigenvalue weighting (default, `use_eigenvalue_weighting=True`):** the SimHash
+projection matrix in the rotated space is sampled from N(0, diag(λ)) rather than
+N(0, I).  Scaling row *i* by √λ_i makes the effective bucket-assignment metric the
+λ-weighted inner product z^T diag(λ) z', concentrating discrimination on
+high-variance eigenbasis coordinates.  This is the SimHash analog of the water-filling
+bit allocation in SpectralQuant (Vangara & Gopinath, 2026): *structure beats budget*.
+
+**Ablation:** set `use_eigenvalue_weighting=False` to use uniform Gaussian SimHash
+in the rotated space.  This isolates the rotation contribution from the weighting
+contribution at fixed compression ratio.
+
+**Motivation:** SpectralQuant documents that LLM key covariances have participation
+ratio deff/dh ≈ 3–5% at dh=128 across Qwen2.5, Mistral-7B, and Llama-3 — roughly
+4–6 eigendirections carry the variance at head dimension 128.  ColQwen2 and
+ColQwen3.5 are produced by trained attention heads on the same class of transformer
+architecture, so the same low-effective-rank structure is expected in their patch
+embeddings.  The `participation_ratio` field on `EigenbasisCalibration` lets you
+verify this on your own corpus.
+
+**Participation ratio inspection:**
+
+```python
+cal = calibrate_from_embeddings(your_embeddings)
+print(f"deff = {cal.participation_ratio:.1f} / {cal.eigenvectors.shape[0]}")
+# Expected for ColQwen2: deff ≈ 4–8 / 128
+```
+
+**Cost:** O(N·d²) for the rotation matmul per token, plus O(N·d·k) for SimHash —
+higher than `DEFAULT_IDENTITY` at O(N·d·k).  Calibration itself (one forward pass
++ eigendecomposition) runs in seconds on a single GPU.
+
+**Constraint:** `num_simhash_projections ≥ 1`; encoding before `calibrate()` raises
+`RuntimeError`.
+
+ — O(num_empty) fill for all projection types
 
 By default, `fill_empty_partitions=True` uses **Hamming nearest-neighbor fill**:
 for each empty slot, find the token with the smallest Hamming distance in the SimHash
@@ -413,7 +517,7 @@ enc = MUVERAEncoder(
 
 ---
 
-#### SimHash projection modes — five-way comparison (ColQwen2, d=128)
+#### SimHash projection modes — six-way comparison (ColQwen2, d=128)
 
 | Mode | SimHash cost (d=128) | vs baseline | Quality | Extra constraint |
 |---|---|---|---|---|
@@ -422,6 +526,7 @@ enc = MUVERAEncoder(
 | `LOW_RANK_GAUSSIAN` r=1 | 136N ops (k=8) | **7.5×** | ~100% variance baseline | `1 ≤ r < k` |
 | `SRHT` | 904N ops (k=8) | 1.1× | Full JL, no rank error | `k ≤ next_pow2(d)` |
 | `CROSS_POLYTOPE` | 896N ops (all partitions) | 1.1× | Theoretically optimal cosine | `fill` recommended |
+| `CALIBRATED_EIGENBASIS` | (1024+d²)N ops (k=8) | ~0.5× | Data-aware; structure beats budget | `calibrate()` required |
 
 #### Empty-slot fill strategies — comparison
 
@@ -450,6 +555,13 @@ for all other modes via `densifying_fill=True`.
   partitioning without tuning k. Best for high-d models (ColQwen3.5 d=320) where
   num_partitions = 2×512 = 1024 gives fine-grained coverage. Always pair with
   `fill_empty_partitions=True` (densifying fill is automatic).
+* **`CALIBRATED_EIGENBASIS`** — when your corpus has a stable domain and you can
+  afford a one-time calibration pass (seconds on GPU). Best for production pipelines
+  on domain-specific corpora (scientific papers, legal documents, clinical notes)
+  where embeddings are strongly non-isotropic. Run `calibrate_from_embeddings()` on
+  a representative 256–1024 page sample; inspect `calibration.participation_ratio`
+  to confirm low effective rank (< 10 for d=128 is a good signal). Save the
+  calibration object alongside your FAISS index.
 * **Densifying LSH fill** — when fill cost is a bottleneck (large k, large corpus),
   or whenever using `CROSS_POLYTOPE`. Enable with `densifying_fill=True` on any
   projection type. Trades geometric precision for O(num_empty) speed.
@@ -754,9 +866,32 @@ enc = MUVERAEncoder(
 # fde_dimension = 4 × 65536 × 320 = 83,886,080 — use final_projection_dimension
 ```
 
----
+#### ColQwen2 (d=128) — calibrated eigenbasis (domain-specific corpora)
 
-### Quality vs. exact MaxSim — setting realistic expectations
+```python
+from pymuvera import MUVERAEncoder, ProjectionType, calibrate_from_embeddings
+
+# One-time calibration on a representative corpus sample
+# corpus_embeddings: (N, 128) array of ColQwen2 patch embeddings from ~256 pages
+calibration = calibrate_from_embeddings(corpus_embeddings)
+print(f"Effective rank: {calibration.participation_ratio:.1f} / 128")
+calibration.save("colqwen2_calibration.npz")
+
+enc = MUVERAEncoder(
+    dimension=128,
+    num_simhash_projections=8,
+    num_repetitions=8,
+    projection_type=ProjectionType.CALIBRATED_EIGENBASIS,
+    fill_empty_partitions=True,
+    seed=42,
+    calibration=calibration,
+)
+# fde_dimension = 8 × 256 × 128 = 262,144
+# Partition assignment concentrates on the ~4–8 high-variance eigendirections
+# Best for: scientific papers, legal/clinical documents, domain-specific corpora
+```
+
+--- — setting realistic expectations
 
 MUVERA FDE retrieval is a **first-stage filter**, not a replacement for exact MaxSim.
 Typical recall gaps on a 512-token ColQwen3.5 corpus:

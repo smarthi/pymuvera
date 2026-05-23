@@ -6,6 +6,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict
 
 from pymuvera._internal.sketch import (
+    calibrated_eigenbasis_simhash_matrix,
     cross_polytope_params,
     low_rank_simhash_factors,
     simhash_matrix,
@@ -28,6 +29,9 @@ class RepParams(BaseModel):
     srht_padded_dim: int | None = None
     cp_d_signs: np.ndarray | None = None
     cp_padded_dim: int | None = None
+    # CALIBRATED_EIGENBASIS fields
+    eigenbasis_rotation: np.ndarray | None = None  # (d, d) U matrix
+    eigenbasis_simhash_mat: np.ndarray | None = None  # (d, k) in eigenbasis space
 
 
 def build_rep_params(
@@ -40,6 +44,10 @@ def build_rep_params(
     simhash_rank: int = 1,
     use_srht: bool = False,
     use_cross_polytope: bool = False,
+    use_calibrated_eigenbasis: bool = False,
+    calibration_eigenvalues: np.ndarray | None = None,
+    calibration_eigenvectors: np.ndarray | None = None,
+    use_eigenvalue_weighting: bool = True,
 ) -> RepParams:
     """Precompute projection parameters for one repetition."""
     cs_indices = cs_signs = None
@@ -53,8 +61,22 @@ def build_rep_params(
     srht_padded_dim = None
     cp_d_signs = None
     cp_padded_dim = None
+    eigenbasis_rotation = None
+    eigenbasis_simhash_mat = None
 
-    if use_cross_polytope:
+    if use_calibrated_eigenbasis:
+        assert calibration_eigenvalues is not None and calibration_eigenvectors is not None, (
+            "calibration_eigenvalues and calibration_eigenvectors must be provided "
+            "when use_calibrated_eigenbasis=True"
+        )
+        eigenbasis_rotation = calibration_eigenvectors  # (d, d)
+        eigenbasis_simhash_mat = calibrated_eigenbasis_simhash_matrix(
+            rep_seed,
+            calibration_eigenvalues,
+            num_simhash_projections,
+            use_eigenvalue_weighting=use_eigenvalue_weighting,
+        )
+    elif use_cross_polytope:
         cp_d_signs, cp_padded_dim = cross_polytope_params(rep_seed, projection_dim)
     elif num_simhash_projections > 0:
         if use_srht:
@@ -79,4 +101,6 @@ def build_rep_params(
         srht_padded_dim=srht_padded_dim,
         cp_d_signs=cp_d_signs,
         cp_padded_dim=cp_padded_dim,
+        eigenbasis_rotation=eigenbasis_rotation,
+        eigenbasis_simhash_mat=eigenbasis_simhash_mat,
     )

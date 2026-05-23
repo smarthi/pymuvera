@@ -25,6 +25,7 @@ try:
 except PackageNotFoundError:  # editable / source installs before build
     __version__ = "0.0.0.dev0"
 
+from pymuvera._internal.calibration import EigenbasisCalibration, calibrate_from_embeddings
 from pymuvera.config import FDEConfig, ProjectionType
 from pymuvera.core import generate_document_fde, generate_query_fde
 from pymuvera.encoder import MUVERAEncoder
@@ -35,6 +36,9 @@ __all__ = [
     # Config
     "FDEConfig",
     "ProjectionType",
+    # Calibration
+    "EigenbasisCalibration",
+    "calibrate_from_embeddings",
     # Low-level functional API
     "generate_query_fde",
     "generate_document_fde",
