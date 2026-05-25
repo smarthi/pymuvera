@@ -1106,10 +1106,10 @@ Key observations from the breakdown:
 - **Empty slot error disappears** with `fill_empty_partitions=True` — the bar for `k=8 + fill` is much shorter.
 - **LOW_RANK_GAUSSIAN** at r=4 adds a visible extra band. Use r/k ≤ 0.25 to keep it small.
 - **SRHT** matches DEFAULT_IDENTITY in error profile — structured projection, no rank approximation.
-- **CALIBRATED_EIGENBASIS** is not included in this stacked breakdown; see the
-  spectral-bias plot above and evaluate it with weighted/unweighted ablations
-  because it can reduce semantic collision error or increase tail-detail error
-  depending on the corpus.
+- **CALIBRATED_EIGENBASIS** is intentionally shown separately because its error can
+  move in either direction depending on the corpus spectrum and where retrieval
+  signal lives. See the spectral-bias plot above and evaluate it with
+  weighted/unweighted ablations.
 
 ### The two-stage pipeline and error recovery
 
