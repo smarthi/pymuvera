@@ -23,7 +23,7 @@ from importlib.metadata import PackageNotFoundError, version
 try:
     __version__: str = version("pymuvera")
 except PackageNotFoundError:  # editable / source installs before build
-    __version__ = "0.0.0.dev0"
+    __version__ = "0.4.2"
 
 from pymuvera._internal.calibration import EigenbasisCalibration, calibrate_from_embeddings
 from pymuvera.config import FDEConfig, ProjectionType

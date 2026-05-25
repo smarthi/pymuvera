@@ -18,9 +18,13 @@ Coverage targets:
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+import pymuvera
 from pymuvera import (
     FDEConfig,
     MUVERAEncoder,
@@ -35,6 +39,11 @@ from pymuvera._internal.validation import validate_config
 # ---------------------------------------------------------------------------
 
 DIM = 32
+
+
+def test_source_version_matches_pyproject() -> None:
+    pyproject = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text())
+    assert pymuvera.__version__ == pyproject["project"]["version"]
 
 
 @pytest.fixture
