@@ -1,20 +1,69 @@
-muvera-fde
-Copyright 2025 Suneel Marthi
+pymuvera
+Copyright 2026 Suneel Marthi
 
-This product includes a faithful Python port of functionality from Google's
-graph-mining project:
+This distribution is licensed under the Apache License, Version 2.0.
+A copy of the License is included in this distribution as LICENSE.
+
+Upstream Google graph-mining attribution
+----------------------------------------
+
+This product includes a Python port and adaptation of functionality from
+Google's graph-mining project:
 
     https://github.com/google/graph-mining/tree/main/sketching/point_cloud
 
 Copyright 2024 Google LLC
 
-Licensed under the Apache License, Version 2.0 (the "License").
-A copy of the License is included in this distribution (see LICENSE).
+The upstream Google graph-mining source code is licensed under the Apache
+License, Version 2.0. The original source code is available at:
 
-The original Google graph-mining source code is available at:
     https://github.com/google/graph-mining
 
+Research references and algorithmic inspirations
+------------------------------------------------
+
+The following papers and projects inform algorithms, implementation choices, or
+experimental modes in pymuvera. Except for the Google graph-mining port noted
+above, these references are acknowledgements of research inspiration rather than
+notices for bundled third-party source code.
+
 The MUVERA algorithm is described in:
+
     "MUVERA: Multi-Vector Retrieval via Fixed Dimensional Encodings"
-    Rajput et al., 2024
+    Dhulipala et al., 2024
     https://arxiv.org/abs/2405.19504
+
+LOW_RANK_GAUSSIAN is inspired by:
+
+    "EGGROLL: Evolution Strategies at the Hyperscale"
+    Sarkar et al., 2025
+    https://eshyperscale.github.io/imgs/paper.pdf
+
+SRHT support uses the Subsampled Randomized Hadamard Transform family described
+in:
+
+    "A fast randomized algorithm for the approximation of matrices"
+    Woolfe, Liberty, Rokhlin, and Tygert, 2008
+    https://doi.org/10.1016/j.acha.2007.12.002
+
+CROSS_POLYTOPE partitioning is based on Cross-Polytope LSH as described in:
+
+    "Optimal Data-Dependent Hashing for Approximate Near Neighbors"
+    Andoni and Razenshteyn, 2015
+    https://arxiv.org/abs/1509.02897
+
+Densifying LSH fill is inspired by:
+
+    "Asymmetric LSH (ALSH) for Sublinear Time Maximum Inner Product Search"
+    Shrivastava, 2014
+    https://arxiv.org/abs/1401.4605
+
+CALIBRATED_EIGENBASIS is an experimental FDE/LSH adaptation inspired by
+SpectralQuant's calibrated eigenbasis idea:
+
+    SpectralQuant
+    Vangara and Gopinath, 2026
+    https://github.com/Dynamis-Labs/spectralquant
+
+pymuvera does not implement SpectralQuant's KV-cache quantizer, semantic/tail
+split, QJL correction, Lloyd-Max codebooks, or integer bit-allocation pipeline.

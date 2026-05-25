@@ -1,4 +1,4 @@
-"""Per-repetition projection parameter containers for muvera-fde."""
+"""Per-repetition projection parameter containers for pymuvera."""
 
 from __future__ import annotations
 

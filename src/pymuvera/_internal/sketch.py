@@ -1,4 +1,4 @@
-"""Internal random-projection primitives for muvera-fde."""
+"""Internal random-projection primitives for pymuvera."""
 
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """
-Tests for muvera-fde.
+Tests for pymuvera.
 
 Coverage targets:
   - FDEConfig validation (all error branches, including LOW_RANK_GAUSSIAN)

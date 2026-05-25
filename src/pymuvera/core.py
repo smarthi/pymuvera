@@ -1,4 +1,4 @@
-"""Core FDE generation for muvera-fde."""
+"""Core FDE generation for pymuvera."""
 
 from __future__ import annotations
 

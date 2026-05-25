@@ -1,5 +1,5 @@
 """
-Public configuration types for muvera-fde.
+Public configuration types for pymuvera.
 
 These are the only types callers need to import to configure an encoder.
 """

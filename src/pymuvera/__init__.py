@@ -1,5 +1,5 @@
 """
-muvera-fde: Fixed Dimensional Encodings for Multi-Vector Retrieval.
+pymuvera: Fixed Dimensional Encodings for Multi-Vector Retrieval.
 
 Python port of Google's graph-mining MUVERA implementation:
   https://github.com/google/graph-mining/tree/main/sketching/point_cloud
@@ -21,7 +21,7 @@ Quick start
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__: str = version("muvera-fde")
+    __version__: str = version("pymuvera")
 except PackageNotFoundError:  # editable / source installs before build
     __version__ = "0.0.0.dev0"
 

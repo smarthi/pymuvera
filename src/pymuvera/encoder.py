@@ -1,4 +1,4 @@
-"""High-level encoder for muvera-fde."""
+"""High-level encoder for pymuvera."""
 
 from __future__ import annotations
 
